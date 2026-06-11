@@ -939,6 +939,34 @@ app.post('/api/auth/login', async (req, res) => {
     res.status(error.status || 500).json(errorPayload(error));
   }
 });
+app.post('/api/auth/refresh', async (req, res) => {
+  try {
+    const refreshToken = String(req.body?.refreshToken || '').trim();
+
+    if (!refreshToken) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Refresh token is required.'
+      });
+    }
+
+    const authData = await supabaseAuthRequest('token?grant_type=refresh_token', {
+      method: 'POST',
+      body: JSON.stringify({
+        refresh_token: refreshToken
+      })
+    });
+
+    const profile = authData?.user ? await getUserProfile(authData.user.id) : null;
+
+    res.json({
+      ok: true,
+      ...clientAuthResponse(authData, profile)
+    });
+  } catch (error) {
+    res.status(error.status || 401).json(errorPayload(error));
+  }
+});
 
 app.get('/api/auth/me', async (req, res) => {
   try {
