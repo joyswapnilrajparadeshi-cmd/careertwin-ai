@@ -160,6 +160,12 @@ function storeSession(session) {
   if (session?.accessToken) localStorage.setItem('careertwin-session', JSON.stringify(session));
   else localStorage.removeItem('careertwin-session');
 }
+function isTokenExpired(session, skewSeconds = 60) {
+  const expiresAt = Number(session?.expiresAt || 0);
+  if (!expiresAt) return false;
+
+  return Date.now() >= (expiresAt - skewSeconds) * 1000;
+}
 
 function scoreLabel(score) {
   if (score >= 82) return 'Interview-ready';
@@ -278,13 +284,68 @@ function App() {
       setBusyAction('');
     }
   }
+  async function refreshSession(currentSession = session) {
+  if (!currentSession?.refreshToken) {
+    setSession(null);
+    throw new Error('Your session expired. Please sign in again.');
+  }
+
+  const response = await fetch('/api/auth/refresh', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      refreshToken: currentSession.refreshToken
+    })
+  });
+
+  const data = await response.json();
+
+  if (!response.ok || !data.ok) {
+    setSession(null);
+    throw new Error(data.error || 'Your session expired. Please sign in again.');
+  }
+
+  setSession(data);
+  return data;
+}
+
+async function getUsableSession(currentSession = session) {
+  if (!currentSession?.accessToken) {
+    throw new Error('Sign in required.');
+  }
+
+  return isTokenExpired(currentSession)
+    ? refreshSession(currentSession)
+    : currentSession;
+}
+
+async function authFetch(url, options = {}, currentSession = session, allowRetry = true) {
+  const activeSession = await getUsableSession(currentSession);
+
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      ...(options.headers || {}),
+      ...authHeaders(activeSession)
+    }
+  });
+
+  if (response.status === 401 && allowRetry && activeSession?.refreshToken) {
+    const refreshedSession = await refreshSession(activeSession);
+    return authFetch(url, options, refreshedSession, false);
+  }
+
+  return response;
+}
 
   async function loadPlans(currentSession = session) {
     if (!currentSession?.accessToken) return;
     setBusyAction('refreshPlans');
     setNotice('Refreshing saved plans...');
     try {
-      const response = await fetch('/api/plans', { headers: authHeaders(currentSession) });
+     const response = await authFetch('/api/plans', {}, currentSession);
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(data.error || 'Could not load saved plans.');
       setPlans(data.plans || []);
@@ -346,11 +407,17 @@ function App() {
     setBusyAction('savePlan');
     setNotice('Saving plan to your archive...');
     try {
-      const response = await fetch('/api/plans', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders(session) },
-        body: JSON.stringify({ report, title: report.title, targetRole: report.candidateSnapshot?.targetRole })
-      });
+      const response = await authFetch('/api/plans', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    report,
+    title: report.title,
+    targetRole: report.candidateSnapshot?.targetRole
+  })
+});
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(data.error || 'Could not save plan.');
       setPlans((current) => [data.plan, ...current]);
@@ -366,7 +433,9 @@ function App() {
     setBusyAction(`delete:${id}`);
     setNotice('Deleting saved plan...');
     try {
-      const response = await fetch(`/api/plans/${id}`, { method: 'DELETE', headers: authHeaders(session) });
+      const response = await authFetch(`/api/plans/${id}`, {
+  method: 'DELETE'
+});
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(data.error || 'Could not delete plan.');
       setPlans((current) => current.filter((plan) => plan.id !== id));
